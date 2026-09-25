@@ -1,0 +1,1222 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.Drawing;
+using System.Linq;
+using ATAS.DataFeedsCore;
+using ATAS.DataFeedsCore.Statistics;
+using ATAS.Indicators;
+using OFT.Attributes;
+using OFT.Rendering.Context;
+using OFT.Rendering.Tools;
+using Utils.Common.Attributes;
+using Utils.Common;
+
+using DashStyle = System.Drawing.Drawing2D.DashStyle;
+using Pen = OFT.Rendering.Tools.RenderPen;
+
+namespace Info_Display
+{
+    [Category(IndicatorCategories.Trading)]
+    [DisplayName("Account Info(Custom)")]
+    public class MyCustomIndicator : Indicator
+    {
+        #region Nested Types
+
+        internal class TradeObj
+        {
+            internal int OpenBar { get; set; }
+            internal decimal OpenPrice { get; set; }
+            internal int CloseBar { get; set; }
+            internal decimal ClosePrice { get; set; }
+            internal OrderDirections Direction { get; set; }
+            internal decimal PnL { get; set; }
+            internal decimal PnLTicks { get; set; }
+            internal DateTime OpenTime { get; set; }
+            internal DateTime CloseTime { get; set; }
+            internal decimal Volume { get; set; }
+            internal string Security { get; set; }
+
+            public TradeObj(HistoryMyTrade trade)
+            {
+                OpenPrice = trade.OpenPrice;
+                ClosePrice = trade.ClosePrice;
+                Direction = trade.OpenVolume > 0 ? OrderDirections.Buy : OrderDirections.Sell;
+                PnL = trade.PnL;
+                PnLTicks = trade.TicksPnL;
+                OpenTime = trade.OpenTime;
+                CloseTime = trade.CloseTime;
+                Volume = Math.Abs(trade.OpenVolume);
+                Security = trade.Security.Code;
+            }
+        }
+
+        public enum LabelDisplayMode
+        {
+            Hide,
+            Short,
+            Full
+        }
+
+        public enum HorizontalAlignment
+        {
+            Left,
+            Center,
+            Right
+        }
+
+        public enum VerticalAlignment
+        {
+            Top,
+            Middle,
+            Bottom
+        }
+
+        #endregion
+
+        #region Fields
+
+        private Color _backgroundColor = Color.FromArgb(200, 20, 25, 35);
+        private Color _textColor = Color.FromArgb(220, 220, 220);
+        private Color _positiveColor = Color.FromArgb(0, 230, 118);
+        private Color _negativeColor = Color.FromArgb(255, 82, 82);
+        private Color _neutralColor = Color.FromArgb(150, 150, 150);
+        private RenderFont _font = new("Arial", 11);
+        private const int Padding = 10;
+
+        // State tracking for Trailing Drawdown & Audio
+        private string _lastAccountId = string.Empty;
+        private decimal _peakClosedPnL = decimal.MinValue;
+        private decimal _lastNetClosedPnL = 0m;
+        private decimal _lastPositionVolume = 0m;
+
+        private bool _isFirstLoad = true;
+        private bool _dllHit = false;
+        private bool _targetHit = false;
+
+        // Trade Visualization Fields
+        private RenderFont _labelFont = new("Arial", 8F, FontStyle.Regular, GraphicsUnit.Point, 204);
+        private readonly List<TradeObj> _trades = new();
+        private Pen _buyPen;
+        private Pen _sellPen;
+        private Color _buyColor = Color.FromArgb(0xFF, 0x2C, 0x4F, 0x3A);
+        private Color _sellColor = Color.FromArgb(0xFF, 0x64, 0x27, 0x33);
+        private Color _profitColor = Color.FromArgb(0xFF, 0x16, 0x7A, 0x3B);
+        private Color _lossColor = Color.FromArgb(0xFF, 0xB0, 0x49, 0x4F);
+        private float _lineWidth = 2f;
+        private DashStyle _lineStyle = DashStyle.Dash;
+        private readonly List<Rectangle> _labelsAbove = new();
+        private readonly List<Rectangle> _labelsBelow = new();
+        private ITradingStatistics? _statistics;
+
+        #endregion
+
+        #region Properties
+
+        [Display(Name = "Background Color", GroupName = "Visualization")]
+        public Color BackgroundColor
+        {
+            get => _backgroundColor;
+            set => _backgroundColor = value;
+        }
+
+        [Display(Name = "Text Color", GroupName = "Visualization")]
+        public Color TextColor
+        {
+            get => _textColor;
+            set => _textColor = value;
+        }
+
+        [Display(Name = "Positive Color", GroupName = "Visualization")]
+        public Color PositiveColor
+        {
+            get => _positiveColor;
+            set => _positiveColor = value;
+        }
+
+        [Display(Name = "Negative Color", GroupName = "Visualization")]
+        public Color NegativeColor
+        {
+            get => _negativeColor;
+            set => _negativeColor = value;
+        }
+
+        [Display(Name = "Neutral Color", GroupName = "Visualization")]
+        public Color NeutralColor
+        {
+            get => _neutralColor;
+            set => _neutralColor = value;
+        }
+
+        [Display(Name = "Font Size", GroupName = "Visualization")]
+        [Range(6, 30)]
+        public int FontSize
+        {
+            get => (int)_font.Size;
+            set
+            {
+                if ((int)_font.Size == value) return;
+                _font = new RenderFont("Arial", value);
+            }
+        }
+
+        [Display(Name = "Pop-up Open Positions", GroupName = "Global Settings")]
+        public bool ShowActivePosition { get; set; } = true;
+
+        [Display(Name = "Show Today's Stats", GroupName = "Global Settings")]
+        public bool ShowTodaysStats { get; set; } = true;
+
+        // --- STATS CONFIGURATION ---
+
+        [Display(Name = "Show Trades", GroupName = "Stats Configuration")]
+        public bool StatShowTrades { get; set; } = true;
+
+        [Display(Name = "Show Wins", GroupName = "Stats Configuration")]
+        public bool StatShowWins { get; set; } = true;
+
+        [Display(Name = "Show Performance Ratio / Edge", GroupName = "Stats Configuration")]
+        public bool StatShowPerformance { get; set; } = true;
+
+        [Display(Name = "Show Expected Value (EV)", GroupName = "Stats Configuration")]
+        public bool StatShowEV { get; set; } = true;
+
+        [Display(Name = "Show Profit Factor", GroupName = "Stats Configuration")]
+        public bool StatShowProfitFactor { get; set; } = true;
+
+        [Display(Name = "Show Win Rate", GroupName = "Stats Configuration")]
+        public bool StatShowWinRate { get; set; } = true;
+
+        [Display(Name = "Show Avg Win", GroupName = "Stats Configuration")]
+        public bool StatShowAvgWin { get; set; } = true;
+
+        [Display(Name = "Show Avg Loss", GroupName = "Stats Configuration")]
+        public bool StatShowAvgLoss { get; set; } = true;
+
+        [Display(Name = "Show Best Trade", GroupName = "Stats Configuration")]
+        public bool StatShowBestTrade { get; set; } = true;
+
+        [Display(Name = "Show Worst Trade", GroupName = "Stats Configuration")]
+        public bool StatShowWorstTrade { get; set; } = true;
+
+        
+
+        // --- TRADE VISUALIZATION SETTINGS ---
+
+        [Display(Name = "Show Trade Lines", GroupName = "Trade Visualization")]
+        public bool ShowLine { get; set; } = true;
+
+        [Display(Name = "Show Tooltips", GroupName = "Trade Visualization")]
+        public bool ShowTooltip { get; set; } = true;
+
+        [Display(Name = "Label Display Mode", GroupName = "Trade Visualization")]
+        public LabelDisplayMode LabelDisplay { get; set; } = LabelDisplayMode.Hide;
+
+        [Display(Name = "Buy Line Color", GroupName = "Trade Visualization")]
+        public Color BuyColor
+        {
+            get => _buyColor;
+            set
+            {
+                _buyColor = value;
+                _buyPen = GetNewPen(_buyColor, _lineWidth, _lineStyle);
+            }
+        }
+
+        [Display(Name = "Sell Line Color", GroupName = "Trade Visualization")]
+        public Color SellColor
+        {
+            get => _sellColor;
+            set
+            {
+                _sellColor = value;
+                _sellPen = GetNewPen(_sellColor, _lineWidth, _lineStyle);
+            }
+        }
+
+        [Display(Name = "Trade Profit Color", GroupName = "Trade Visualization")]
+        public Color ProfitColor
+        {
+            get => _profitColor;
+            set => _profitColor = value;
+        }
+
+        [Display(Name = "Trade Loss Color", GroupName = "Trade Visualization")]
+        public Color LossColor
+        {
+            get => _lossColor;
+            set => _lossColor = value;
+        }
+
+        [Range(1, 20)]
+        [Display(Name = "Line Width", GroupName = "Trade Visualization")]
+        public float LineWidth
+        {
+            get => _lineWidth;
+            set
+            {
+                _lineWidth = value;
+                _buyPen = GetNewPen(_buyColor, _lineWidth, _lineStyle);
+                _sellPen = GetNewPen(_sellColor, _lineWidth, _lineStyle);
+            }
+        }
+
+        [Display(Name = "Line Dash Style", GroupName = "Trade Visualization")]
+        public DashStyle LineStyle
+        {
+            get => _lineStyle;
+            set
+            {
+                _lineStyle = value;
+                _buyPen = GetNewPen(_buyColor, _lineWidth, _lineStyle);
+                _sellPen = GetNewPen(_sellColor, _lineWidth, _lineStyle);
+            }
+        }
+
+        [Range(1, 10)]
+        [Display(Name = "Marker Size", GroupName = "Trade Visualization")]
+        public int MarkerSize { get; set; } = 2;
+
+        // --- RISK MANAGEMENT ---
+
+        [Display(Name = "Show Visual PnL Slider", GroupName = "Risk Management", Order = 5)]
+        public bool ShowPnlSlider { get; set; } = true;
+
+        [Display(Name = "Profit Target ($)", GroupName = "Risk Management", Order = 6)]
+        [Range(0, 1000000)]
+        public int ProfitTarget { get; set; } = 3000;  
+
+        [Display(Name = "Daily Loss Limit ($)", GroupName = "Risk Management")]
+        [Range(0, 100000)]
+        public int DailyLossLimit { get; set; } = 1000;
+
+        [Display(Name = "Enable Trailing Limit", GroupName = "Risk Management")]
+        public bool EnableTrailing { get; set; } = true;
+
+        [Display(Name = "Trailing Limit Distance ($)", GroupName = "Risk Management")]
+        [Range(0, 100000)]
+        public int TrailingDrawdown { get; set; } = 2000;
+
+        [Display(Name = "Show Buffer Room", GroupName = "Risk Management")]
+        public bool ShowBufferRoom { get; set; } = true;
+
+        // --- AUDIO ALERTS ---
+
+        [Display(Name = "Enable Audio Alerts", GroupName = "Audio Alerts")]
+        public bool EnableAudioAlerts { get; set; } = true;
+
+        [Display(Name = "Position Entered / Added", GroupName = "Audio Alerts")]
+        [OFT.Attributes.Editors.SoundComboBoxEditor]
+        public string AudioPositionEntered { get; set; } = "alert1";
+
+        [Display(Name = "Trade Win", GroupName = "Audio Alerts")]
+        [OFT.Attributes.Editors.SoundComboBoxEditor]
+        public string AudioTradeWin { get; set; } = "alert2";
+
+        [Display(Name = "Trade Loss", GroupName = "Audio Alerts")]
+        [OFT.Attributes.Editors.SoundComboBoxEditor]
+        public string AudioTradeLoss { get; set; } = "alert3";
+
+        [Display(Name = "Profit Target Hit", GroupName = "Audio Alerts")]
+        [OFT.Attributes.Editors.SoundComboBoxEditor]
+        public string AudioTargetHit { get; set; } = "alert4";
+
+        [Display(Name = "Loss Limit Hit", GroupName = "Audio Alerts")]
+        [OFT.Attributes.Editors.SoundComboBoxEditor]
+        public string AudioDllHit { get; set; } = "alarm1";
+
+        [Display(Name = "Reset Audio Triggers (Check to reset)", GroupName = "Audio Alerts")]
+        public bool ResetAudioTriggers
+        {
+            get => false;
+            set
+            {
+                if (value)
+                {
+                    _dllHit = false;
+                    _targetHit = false;
+                }
+            }
+        }
+
+        // --- COMMISSIONS & SETTINGS ---
+
+        [Display(Name = "Deduct Commissions", GroupName = "Commission Settings")]
+        public bool DeductCommissions { get; set; } = true;
+
+        [Display(Name = "Use Manual Commission Override", GroupName = "Commission Settings")]
+        public bool UseManualCommission { get; set; } = false;
+
+        [Display(Name = "Commission Per Contract ($)", GroupName = "Commission Settings")]
+        [Range(0.0, 100.0)]
+        public double ManualCommissionPerContract { get; set; } = 2.02;
+
+        [Display(Name = "Show Account ID", GroupName = "Settings")]
+        public bool ShowAccountId { get; set; } = true;
+
+        [Display(Name = "Obfuscate Account ID", GroupName = "Settings")]
+        public bool ObfuscateAccountId { get; set; } = true;
+
+        [Display(Name = "Show Currency", GroupName = "Settings")]
+        public bool ShowCurrency { get; set; } = true;
+
+        [Display(Name = "Show Balance", GroupName = "Settings")]
+        public bool ShowBalance { get; set; } = true;
+
+        [Display(Name = "Show Available Balance", GroupName = "Settings")]
+        public bool ShowAvailableBalance { get; set; } = true;
+
+        [Display(Name = "Show Blocked Margin", GroupName = "Settings")]
+        public bool ShowMargin { get; set; } = false;
+
+        [Display(Name = "Show Leverage", GroupName = "Settings")]
+        public bool ShowLeverage { get; set; } = true;
+
+        [Display(Name = "Show Open PnL", GroupName = "Settings")]
+        public bool ShowOpenPnL { get; set; } = true;
+
+        [Display(Name = "Show Net Closed PnL", GroupName = "Settings")]
+        public bool ShowClosedPnL { get; set; } = true;
+
+        [Display(Name = "Show Net Total PnL", GroupName = "Settings")]
+        public bool ShowTotalPnL { get; set; } = true;
+
+        [Display(Name = "Horizontal Position", GroupName = "Layout")]
+        public HorizontalAlignment HorizontalPosition { get; set; } = HorizontalAlignment.Left;
+
+        [Display(Name = "Vertical Position", GroupName = "Layout")]
+        public VerticalAlignment VerticalPosition { get; set; } = VerticalAlignment.Bottom;
+
+        [Display(Name = "Offset X", GroupName = "Layout")]
+        [Range(0, 1000)]
+        public int OffsetX { get; set; } = 20;
+
+        [Display(Name = "Offset Y", GroupName = "Layout")]
+        [Range(0, 1000)]
+        public int OffsetY { get; set; } = 20;
+
+        [Display(Name = "Column Spacing", GroupName = "Layout")]
+        [Range(5, 50)]
+        public int ColumnSpacing { get; set; } = 15;
+
+        #endregion
+
+        #region ctor
+
+        public MyCustomIndicator()
+            : base(true)
+        {
+            DenyToChangePanel = true;
+            EnableCustomDrawing = true;
+            SubscribeToDrawingEvents(DrawingLayouts.Final);
+            DataSeries[0].IsHidden = true;
+            ((ValueDataSeries)DataSeries[0]).VisualType = VisualMode.Hide;
+        }
+
+        #endregion
+
+        #region Protected Methods
+
+        protected override void OnInitialize()
+        {
+            TradingStatisticsProvider.StatisticsRebuilt += OnRecalculate;
+            TradingStatisticsProvider.RawStatisticsSourceChanged += OnTradingStatisticsProviderSourceChanged;
+            TradingStatisticsProvider.FilteredStatisticsSourceChanged += OnTradingStatisticsProviderSourceChanged;
+            TradingManager.PortfolioSelected += TradingManager_PortfolioSelected;
+            TradingManager.SecuritySelected += OnSecuritySelected;
+
+            RefreshStatisticsSource(forceRecalculate: true);
+        }
+
+        protected override void OnDispose()
+        {
+            TradingStatisticsProvider.StatisticsRebuilt -= OnRecalculate;
+            TradingStatisticsProvider.RawStatisticsSourceChanged -= OnTradingStatisticsProviderSourceChanged;
+            TradingStatisticsProvider.FilteredStatisticsSourceChanged -= OnTradingStatisticsProviderSourceChanged;
+            TradingManager.PortfolioSelected -= TradingManager_PortfolioSelected;
+            TradingManager.SecuritySelected -= OnSecuritySelected;
+
+            if (_statistics != null)
+                _statistics.HistoryMyTrades.Added -= OnTradeAdded;
+        }
+
+        protected override void OnCalculate(int bar, decimal value)
+        {
+        }
+
+        protected override void OnRender(RenderContext context, DrawingLayouts layout)
+        {
+            if (ChartInfo == null || Container == null)
+                return;
+
+            DrawTrades(context);
+
+            var portfolio = TradingManager?.Portfolio;
+            if (portfolio == null)
+                return;
+
+            var position = TradingManager?.Position;
+            decimal currentVolume = position == null ? 0m : Math.Abs(position.Volume);
+
+            var lines = BuildLines(portfolio, currentVolume);
+            if (lines.Count == 0)
+                return;
+
+            var lineHeight = (int)context.MeasureString("A", _font).Height;
+
+            var maxLabelWidth = 0;
+            var maxValueWidth = 0;
+
+            foreach (var line in lines)
+            {
+                var labelWidth = (int)context.MeasureString(line.Label, _font).Width;
+                var valueWidth = (int)context.MeasureString(line.Value, _font).Width;
+
+                if (labelWidth > maxLabelWidth)
+                    maxLabelWidth = labelWidth;
+                if (valueWidth > maxValueWidth)
+                    maxValueWidth = valueWidth;
+            }
+
+            var rectWidth = maxLabelWidth + ColumnSpacing + maxValueWidth + Padding * 2; // ensures slider has enough width
+            int sliderExtraHeight = (ShowPnlSlider) ? 45 : 0;
+            var rectHeight = (lines.Count * lineHeight) + 20 + (Padding * 2);
+
+            var x = CalculateXPosition(rectWidth);
+            var y = CalculateYPosition(rectHeight);
+
+            var rectangle = new Rectangle(x, y, rectWidth, rectHeight);
+            context.FillRectangle(_backgroundColor, rectangle);
+
+            // Draw text
+            var textRect = new Rectangle(x + Padding, y + Padding, rectWidth - Padding * 2, rectHeight - Padding * 2);
+            DrawColoredText(context, lines, textRect, maxLabelWidth);
+
+            // Draw Visual PnL Slider if enabled
+            if (ShowPnlSlider)
+            {
+                DrawPnlSlider(context, textRect, portfolio.ClosedPnL, DailyLossLimit, ProfitTarget);
+            }
+        }
+
+        #endregion
+
+#region Trade Visualization Methods
+        private void DrawPnlSlider(RenderContext context, Rectangle textRect, decimal currentPnL, int dllLimit, int targetLimit)
+        {
+            int sliderWidth = textRect.Width;
+            int sliderHeight = 10;
+            int sliderX = textRect.X;
+            int sliderY = textRect.Y + textRect.Height - 12; // Adjusted buffer spacing
+
+            // If ProfitTarget is 0 or negative, treat it as an open-ended profit mode
+            bool hasTarget = targetLimit > 0;
+
+            decimal minVal = -dllLimit;
+            decimal maxVal = hasTarget ? targetLimit : 0m; // Pushes the 0 marker to the far right edge
+
+            decimal clampedPnL = Math.Max(minVal, Math.Min(maxVal, currentPnL));
+
+            float totalSpan = (float)(maxVal - minVal);
+            float currentProgress = (float)(clampedPnL - minVal) / totalSpan;
+
+            // 1. Draw Background Bar Track
+            var trackRect = new Rectangle(sliderX, sliderY + 4, sliderWidth, sliderHeight - 4);
+            context.FillRectangle(Color.FromArgb(50, 50, 60), trackRect);
+
+            // 2. Draw Negative Zone (Red tint up to zero point)
+            decimal zeroProgress = (0m - minVal) / (decimal)totalSpan;
+            int zeroX = sliderX + (int)(sliderWidth * (float)zeroProgress);
+
+            if (zeroX > sliderX)
+            {
+                var redZone = new Rectangle(sliderX, sliderY + 4, zeroX - sliderX, sliderHeight - 4);
+                context.FillRectangle(Color.FromArgb(120, 40, 40), redZone);
+            }
+
+            // 3. Draw Positive Zone (Green tint) - ONLY if target exists
+            if (hasTarget && sliderX + sliderWidth > zeroX)
+            {
+                var greenZone = new Rectangle(zeroX, sliderY + 4, (sliderX + sliderWidth) - zeroX, sliderHeight - 4);
+                context.FillRectangle(Color.FromArgb(30, 100, 50), greenZone);
+            }
+
+            // 4. Draw Zero Marker Line
+            var linePen = new RenderPen(Color.FromArgb(180, 180, 180), 2);
+            context.DrawLine(linePen, zeroX, sliderY, zeroX, sliderY + sliderHeight);
+
+            // 5. Draw Current PnL Handle
+            int handleX = sliderX + (int)(sliderWidth * currentProgress);
+            int handleWidth = 4;
+            var handleRect = new Rectangle(handleX - (handleWidth / 2), sliderY - 1, handleWidth, sliderHeight + 4);
+
+            context.FillRectangle(Color.White, handleRect);
+            context.DrawRectangle(new RenderPen(Color.Black, 1), handleRect);
+        }
+
+        private void OnTradingStatisticsProviderSourceChanged(ITradingStatistics stat)
+        {
+            RefreshStatisticsSource();
+        }
+
+        private void TradingManager_PortfolioSelected(Portfolio obj)
+        {
+            RefreshStatisticsSource(forceRecalculate: true);
+        }
+
+        private void OnSecuritySelected(Security? security)
+        {
+            OnRecalculate();
+        }
+
+        private void RefreshStatisticsSource(bool forceRecalculate = false)
+        {
+            var stat = TradingManager?.Portfolio?.IsReplay() == true
+                ? TradingStatisticsProvider.FilteredStatistics
+                : TradingStatisticsProvider.RawStatistics;
+
+            if (stat == null)
+            {
+                if (forceRecalculate)
+                    OnRecalculate();
+                return;
+            }
+
+            if (!ReferenceEquals(_statistics, stat))
+            {
+                if (_statistics != null)
+                    _statistics.HistoryMyTrades.Added -= OnTradeAdded;
+
+                _statistics = stat;
+                _statistics.HistoryMyTrades.Added += OnTradeAdded;
+
+                OnRecalculate();
+                return;
+            }
+
+            if (forceRecalculate)
+                OnRecalculate();
+        }
+
+        protected override void OnRecalculate()
+        {
+            _buyPen = GetNewPen(_buyColor, _lineWidth, _lineStyle);
+            _sellPen = GetNewPen(_sellColor, _lineWidth, _lineStyle);
+
+            _trades.Clear();
+            AddHistoryMyTrade();
+        }
+
+        private void AddHistoryMyTrade()
+        {
+            if (TradingManager?.Portfolio == null || TradingManager?.Security == null)
+                return;
+
+            var allTrades = _statistics?
+                .HistoryMyTrades
+                .Where(t =>
+                    t.AccountID == TradingManager.Portfolio.AccountID &&
+                    t.Security.SecurityId.Equals(TradingManager.Security.SecurityId, StringComparison.InvariantCultureIgnoreCase)) ?? [];
+
+            foreach (var trade in allTrades)
+                CreateTradePair(trade);
+        }
+
+        private void OnTradeAdded(HistoryMyTrade trade)
+        {
+            if (TradingManager?.Portfolio == null || TradingManager?.Security == null)
+                return;
+
+            if (trade.AccountID == TradingManager.Portfolio.AccountID &&
+                trade.Security.SecurityId.Equals(TradingManager.Security.SecurityId, StringComparison.InvariantCultureIgnoreCase))
+                CreateTradePair(trade);
+        }
+
+        private void CreateTradePair(HistoryMyTrade trade)
+        {
+            var enterBar = GetBarByTime(trade.OpenTime);
+            if (enterBar < 0) return;
+
+            var exitBar = GetBarByTime(trade.CloseTime);
+
+            var tradeObj = new TradeObj(trade)
+            {
+                OpenBar = enterBar,
+                CloseBar = exitBar,
+            };
+
+            _trades.Add(tradeObj);
+        }
+
+        private int GetBarByTime(DateTime time)
+        {
+            for (int i = CurrentBar - 1; i >= 0; i--)
+            {
+                var candle = GetCandle(i);
+                if (candle.Time <= time)
+                    return i;
+            }
+            return -1;
+        }
+
+        private void DrawTrades(RenderContext context)
+        {
+            List<TradeObj> tooltipTrades = new();
+            List<(TradeObj Trade, bool MouseOverMarker1, bool MouseOverMarker2)> tradeInfo = new();
+            _labelsAbove.Clear();
+            _labelsBelow.Clear();
+
+            foreach (var trade in _trades)
+            {
+                if (trade.OpenBar > LastVisibleBarNumber || trade.CloseBar < FirstVisibleBarNumber)
+                    continue;
+
+                var x1 = ChartInfo.GetXByBar(trade.OpenBar, false);
+                var y1 = ChartInfo.GetYByPrice(trade.OpenPrice, false);
+                var x2 = ChartInfo.GetXByBar(trade.CloseBar, false);
+                var y2 = ChartInfo.GetYByPrice(trade.ClosePrice, false);
+                var pen = GetPenByDirection(trade.Direction);
+
+                if (ShowLine)
+                    context.DrawLine(pen, x1, y1, x2, y2);
+
+                var mouseOver = DrawMarker(context, new Point(x1, y1), trade.Direction, true);
+                var mouseOver2 = DrawMarker(context, new Point(x2, y2), trade.Direction, false);
+
+                tradeInfo.Add((trade, mouseOver, mouseOver2));
+            }
+
+            foreach (var (trade, mouseOver, mouseOver2) in tradeInfo)
+            {
+                var mouseOverLabel = false;
+
+                if (LabelDisplay != LabelDisplayMode.Hide)
+                {
+                    var candle = GetCandle(trade.CloseBar);
+                    var isAbove = trade.Direction == OrderDirections.Buy;
+
+                    var (labelRect, labelHover) = DrawTradeLabel(context, trade, trade.CloseBar, candle, isAbove);
+                    mouseOverLabel = labelHover;
+
+                    if (isAbove)
+                        _labelsAbove.Add(labelRect);
+                    else
+                        _labelsBelow.Add(labelRect);
+                }
+
+                if (ShowTooltip && (mouseOver || mouseOver2 || mouseOverLabel))
+                {
+                    tooltipTrades.Add(trade);
+                }
+            }
+
+            if (tooltipTrades.Any())
+            {
+                var y = MouseLocationInfo.LastPosition.Y;
+                foreach (var trade in tooltipTrades)
+                {
+                    DrawTooltip(context, trade, MouseLocationInfo.LastPosition.X, ref y);
+                    y += 5;
+                }
+            }
+        }
+
+        private void DrawTooltip(RenderContext context, TradeObj trade, int x, ref int y)
+        {
+            var directionColor = trade.Direction == OrderDirections.Buy ? _buyColor : _sellColor;
+            var resultColor = trade.PnL > 0 ? _profitColor : _lossColor;
+            var cornerRadius = 3;
+
+            var direction = trade.Direction == OrderDirections.Buy ? "Long" : "Short";
+            var openTime = trade.OpenTime.Add(InstrumentInfo.TimeZoneOffset);
+            var closeTime = trade.CloseTime.Add(InstrumentInfo.TimeZoneOffset);
+
+            var topText = $"{direction} {trade.Volume} {trade.Security}{Environment.NewLine}{Environment.NewLine}" +
+                          $"Entry\t:  {ChartInfo.GetPriceString(trade.OpenPrice)}  {openTime:dd MMM HH:mm:ss}{Environment.NewLine}" +
+                          $"Exit\t:  {ChartInfo.GetPriceString(trade.ClosePrice)}  {closeTime:dd MMM HH:mm:ss}";
+
+            var bottomText = $"Result:  {(trade.PnL > 0 ? "+" : "")}{trade.PnL}  ({trade.PnLTicks} ticks)";
+
+            var topSize = context.MeasureString(topText, _font);
+            var bottomSize = context.MeasureString(bottomText, _font);
+
+            var padding = 10;
+            var width = (int)Math.Max(topSize.Width, bottomSize.Width) + padding * 2;
+            var topHeight = (int)topSize.Height + padding * 2;
+            var bottomHeight = (int)bottomSize.Height + padding * 2;
+
+            var topRect = new Rectangle(x, y, width, topHeight + cornerRadius * 2);
+            var bottomRect = new Rectangle(x, y + topHeight, width, bottomHeight);
+
+            context.FillRectangle(directionColor, topRect, cornerRadius);
+            context.FillRectangle(resultColor, bottomRect, cornerRadius);
+
+            var overlapCover = new Rectangle(x, y + topHeight, width, cornerRadius * 2);
+            context.FillRectangle(resultColor, overlapCover);
+
+            var topTextRect = new Rectangle(x + padding, y + padding, width - padding * 2, topHeight - padding * 2);
+            var bottomTextRect = new Rectangle(x + padding, y + topHeight + padding, width - padding * 2, bottomHeight - padding * 2);
+
+            var textFormat = new RenderStringFormat() { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Near };
+
+            context.DrawString(topText, _font, Color.White, topTextRect, textFormat);
+            context.DrawString(bottomText, _font, Color.White, bottomTextRect, textFormat);
+
+            y += topHeight + bottomHeight;
+        }
+
+        private bool DrawMarker(RenderContext context, Point point, OrderDirections direction, bool isOpen)
+        {
+            var shift = MarkerSize * 4;
+            var dir = direction == OrderDirections.Buy ? 1 : -1;
+            var y2 = isOpen ? (point.Y + shift * dir) : (point.Y + shift * (-dir));
+            var point2 = new Point(point.X - shift, y2);
+            var point3 = new Point(point2.X + shift * 2, point2.Y);
+            var color = GetMarkerColor(direction, isOpen);
+
+            var points = new Point[] { point, point2, point3 };
+
+            context.FillPolygon(color, points);
+            context.DrawPolygon(ChartInfo.ColorsStore.Grid, points);
+
+            return IsPointInTriangle(MouseLocationInfo.LastPosition, point, point2, point3);
+        }
+
+        private (Rectangle Rect, bool MouseOver) DrawTradeLabel(RenderContext context, TradeObj trade, int bar, IndicatorCandle candle, bool isAbove)
+        {
+            var direction = trade.Direction == OrderDirections.Buy ? "L" : "S";
+            var pnlSign = trade.PnL > 0 ? "+" : "";
+
+            string leftText, rightText;
+
+            if (LabelDisplay == LabelDisplayMode.Full)
+            {
+                var entryPrice = ChartInfo.GetPriceString(trade.OpenPrice);
+                var exitPrice = ChartInfo.GetPriceString(trade.ClosePrice);
+                leftText = $"{direction} {trade.Volume} | {entryPrice}→{exitPrice}";
+                rightText = $" {pnlSign}{trade.PnL} ({trade.PnLTicks}t)";
+            }
+            else
+            {
+                leftText = $"{direction} {trade.Volume}";
+                rightText = $" {pnlSign}{trade.PnL} ({trade.PnLTicks}t)";
+            }
+
+            var leftSize = context.MeasureString(leftText, _labelFont);
+            var rightSize = context.MeasureString(rightText, _labelFont);
+
+            var padding = 3;
+            var leftWidth = leftSize.Width + padding;
+            var rightWidth = rightSize.Width + padding;
+            var rectWidth = leftWidth + rightWidth;
+            var rectHeight = Math.Max(leftSize.Height, rightSize.Height) + padding;
+
+            var candleX = ChartInfo.GetXByBar(bar, false);
+            var barWidth = (int)ChartInfo.PriceChartContainer.BarsWidth;
+            var labelX = candleX - barWidth / 2;
+
+            var markerOffset = MarkerSize * 4;
+            var baseY = isAbove
+                ? ChartInfo.GetYByPrice(candle.High, false) - markerOffset - rectHeight
+                : ChartInfo.GetYByPrice(candle.Low, false) + markerOffset;
+
+            var spacing = 3;
+            var stepSize = rectHeight + spacing;
+            var yPosition = baseY;
+
+            var testRect = new Rectangle(labelX, yPosition, rectWidth, rectHeight);
+            var allLabels = _labelsAbove.Concat(_labelsBelow).ToList();
+
+            while (allLabels.Any(r => r.IntersectsWith(testRect)))
+            {
+                var intersecting = allLabels.Where(r => r.IntersectsWith(testRect)).ToList();
+                if (intersecting.Any())
+                {
+                    if (isAbove)
+                    {
+                        var topmost = intersecting.Min(r => r.Y);
+                        yPosition = topmost - stepSize;
+                    }
+                    else
+                    {
+                        var bottommost = intersecting.Max(r => r.Bottom);
+                        yPosition = bottommost + spacing;
+                    }
+                    testRect = new Rectangle(labelX, yPosition, rectWidth, rectHeight);
+                }
+            }
+
+            var directionColor = trade.Direction == OrderDirections.Buy ? _buyColor : _sellColor;
+            var resultColor = trade.PnL > 0 ? _profitColor : _lossColor;
+            var cornerRadius = 3;
+
+            var leftSectionRect = new Rectangle(testRect.X, testRect.Y, leftWidth + cornerRadius * 2, testRect.Height);
+            context.FillRectangle(directionColor, leftSectionRect, cornerRadius);
+
+            var rightSectionRect = new Rectangle(testRect.X + leftWidth, testRect.Y, rightWidth, testRect.Height);
+            context.FillRectangle(resultColor, rightSectionRect, cornerRadius);
+
+            var overlapCover = new Rectangle(testRect.X + leftWidth, testRect.Y, cornerRadius * 2, testRect.Height);
+            context.FillRectangle(resultColor, overlapCover);
+
+            var leftTextRect = new Rectangle(testRect.X + padding, testRect.Y + padding, leftWidth - padding, testRect.Height - padding * 2);
+            var rightTextRect = new Rectangle(testRect.X + leftWidth, testRect.Y + padding, rightWidth - padding, testRect.Height - padding * 2);
+
+            var leftFormat = new RenderStringFormat() { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center };
+            var rightFormat = new RenderStringFormat() { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+
+            context.DrawString(leftText, _labelFont, Color.White, leftTextRect, leftFormat);
+            context.DrawString(rightText, _labelFont, Color.White, rightTextRect, rightFormat);
+
+            var mouseOver = testRect.Contains(MouseLocationInfo.LastPosition);
+            return (testRect, mouseOver);
+        }
+
+        private bool IsPointInTriangle(Point p, Point p0, Point p1, Point p2)
+        {
+            double area = TriangleArea(p0, p1, p2);
+            double area1 = TriangleArea(p, p0, p1);
+            double area2 = TriangleArea(p, p1, p2);
+            double area3 = TriangleArea(p, p2, p0);
+
+            return Math.Abs(area - (area1 + area2 + area3)) < 0.001;
+        }
+
+        private double TriangleArea(Point p0, Point p1, Point p2)
+        {
+            return Math.Abs((p0.X * (p1.Y - p2.Y) + p1.X * (p2.Y - p0.Y) + p2.X * (p0.Y - p1.Y)) / 2.0);
+        }
+
+        private Color GetMarkerColor(OrderDirections direction, bool isOpen)
+        {
+            return direction switch
+            {
+                OrderDirections.Buy => isOpen ? _buyColor : _sellColor,
+                OrderDirections.Sell => isOpen ? _sellColor : _buyColor,
+                _ => Color.Transparent
+            };
+        }
+
+        private Pen GetPenByDirection(OrderDirections directions)
+        {
+            return directions switch
+            {
+                OrderDirections.Buy => _buyPen,
+                _ => _sellPen,
+            };
+        }
+
+        private Pen GetNewPen(Color color, float lineWidth, DashStyle lineStyle)
+        {
+            return new Pen(color, lineWidth) { DashStyle = lineStyle };
+        }
+
+        #endregion
+
+        #region Account HUD & Risk Management Methods
+
+        private sealed record DisplayLine(string Label, string Value, decimal? RawForColoring, bool IsStatPair = false, decimal? RawForColoringRight = null);
+
+        private List<DisplayLine> BuildLines(Portfolio p, decimal currentVolume)
+        {
+            var lines = new List<DisplayLine>();
+
+            string displayAccount = p.AccountID;
+            if (ObfuscateAccountId && !string.IsNullOrEmpty(displayAccount) && displayAccount.Length > 5)
+            {
+                displayAccount = $"{displayAccount.Substring(0, 4)}***{displayAccount.Substring(displayAccount.Length - 1, 1)}";
+            }
+
+            decimal netClosedPnL = p.ClosedPnL;
+            decimal netTotalPnL = p.ClosedPnL + p.OpenPnL;
+
+            if (DeductCommissions)
+            {
+                decimal activeCommission = p.Commission;
+                if (UseManualCommission && activeCommission == 0m)
+                {
+                    activeCommission = (decimal)ManualCommissionPerContract;
+                }
+
+                netClosedPnL -= activeCommission;
+                netTotalPnL -= activeCommission;
+            }
+
+            // --- STATE TRACKING & PRIORITY AUDIO ALERTS ---
+            if (_lastAccountId != p.AccountID)
+            {
+                _lastAccountId = p.AccountID;
+                _peakClosedPnL = netClosedPnL;
+                _lastNetClosedPnL = netClosedPnL;
+                _dllHit = false;
+                _targetHit = false;
+                _lastPositionVolume = currentVolume;
+                _isFirstLoad = false;
+            }
+            else
+            {
+                _peakClosedPnL = Math.Max(_peakClosedPnL, netClosedPnL);
+
+                if (!_isFirstLoad && EnableAudioAlerts)
+                {
+                    if (currentVolume > _lastPositionVolume)
+                    {
+                        PlayAlert(AudioPositionEntered, "Position Entered / Added");
+                    }
+
+                    if (netClosedPnL != _lastNetClosedPnL)
+                    {
+                        bool justReachedTarget = !_targetHit && netClosedPnL >= ProfitTarget;
+
+                        decimal activeFailureBuffer = DailyLossLimit + netClosedPnL;
+                        if (EnableTrailing)
+                        {
+                            decimal trailingBarrier = _peakClosedPnL - TrailingDrawdown;
+                            decimal trailingBuffer = netClosedPnL - trailingBarrier;
+                            if (trailingBuffer < activeFailureBuffer)
+                            {
+                                activeFailureBuffer = trailingBuffer;
+                            }
+                        }
+                        bool justHitDll = !_dllHit && activeFailureBuffer <= 0;
+
+                        if (justReachedTarget)
+                        {
+                            PlayAlert(AudioTargetHit, "Daily Profit Target Reached!");
+                            _targetHit = true;
+                        }
+                        else if (justHitDll)
+                        {
+                            PlayAlert(AudioDllHit, "Daily Loss Limit Hit!");
+                            _dllHit = true;
+                        }
+                        else
+                        {
+                            if (netClosedPnL > _lastNetClosedPnL)
+                                PlayAlert(AudioTradeWin, "Trade Win");
+                            else if (netClosedPnL < _lastNetClosedPnL)
+                                PlayAlert(AudioTradeLoss, "Trade Loss");
+                        }
+
+                        _lastNetClosedPnL = netClosedPnL;
+                    }
+                }
+            }
+
+            _lastPositionVolume = currentVolume;
+            _isFirstLoad = false;
+
+            // --- HUD RENDERING ---
+            if (ShowAccountId)
+                lines.Add(new("Account", displayAccount, null));
+
+            if (ShowCurrency && p.Currency.HasValue)
+                lines.Add(new("Currency", p.Currency.Value.ToString(), null));
+
+            if (ShowBalance)
+                lines.Add(new("Balance", FormatCurrency(p.Balance), null));
+
+            if (ShowAvailableBalance && p.BalanceAvailable.HasValue)
+                lines.Add(new("Available", FormatCurrency(p.BalanceAvailable.Value), null));
+
+            if (ShowMargin)
+                lines.Add(new("Blocked Margin", FormatCurrency(p.BlockedMargin), null));
+
+            if (ShowLeverage && p.Leverage != 1)
+                lines.Add(new("Leverage", $"{p.Leverage:F2}x", null));
+
+            if (ShowOpenPnL)
+                lines.Add(new("Open PnL", FormatCurrency(p.OpenPnL), p.OpenPnL));
+
+            if (ShowClosedPnL)
+                lines.Add(new("Closed PnL", FormatCurrency(netClosedPnL), netClosedPnL));
+
+            if (ShowTotalPnL)
+                lines.Add(new("Total PnL", FormatCurrency(netTotalPnL), netTotalPnL));
+
+            if (ShowBufferRoom)
+            {
+                decimal dllBuffer = DailyLossLimit + netClosedPnL;
+                decimal activeBuffer = dllBuffer;
+                string bufferLabel = "Buffer Left (DLL)";
+
+                if (EnableTrailing)
+                {
+                    decimal trailingBarrier = _peakClosedPnL - TrailingDrawdown;
+                    decimal trailingBuffer = netClosedPnL - trailingBarrier;
+
+                    if (trailingBuffer < dllBuffer)
+                    {
+                        activeBuffer = trailingBuffer;
+                        bufferLabel = "Buffer Left (Trail)";
+                    }
+                }
+
+                lines.Add(new(bufferLabel, FormatCurrency(activeBuffer), null));
+            }
+
+            if (ShowActivePosition && p.OpenPnL != 0m)
+            {
+                lines.Add(new("----------------", "---------", null));
+                lines.Add(new($"[ACTIVE TRADE] {displayAccount}", FormatCurrency(p.OpenPnL), p.OpenPnL));
+            }
+
+            // --- TODAY'S STATS (Separated and Evenly Distributed 2-Column Format) ---
+            if (ShowTodaysStats && _trades.Any())
+            {
+                var today = DateTime.Today;
+                var todaysTrades = _trades.Where(t => t.CloseTime.Date == today).ToList();
+
+                if (todaysTrades.Any())
+                {
+                    int totalTrades = todaysTrades.Count;
+                    int wins = todaysTrades.Count(t => t.PnL > 0);
+                    int losses = todaysTrades.Count(t => t.PnL < 0);
+
+                    decimal winRate = totalTrades > 0 ? (decimal)wins / totalTrades : 0m;
+                    decimal lossRate = totalTrades > 0 ? (decimal)losses / totalTrades : 0m;
+
+                    var winningTrades = todaysTrades.Where(t => t.PnL > 0).ToList();
+                    var losingTrades = todaysTrades.Where(t => t.PnL < 0).ToList();
+
+                    decimal avgWin = winningTrades.Any() ? winningTrades.Average(t => t.PnL) : 0m;
+                    decimal avgLoss = losingTrades.Any() ? Math.Abs(losingTrades.Average(t => t.PnL)) : 0m;
+
+                    decimal winLossRatio = avgLoss > 0 ? avgWin / avgLoss : (avgWin > 0 ? 1m : 0m);
+                    decimal performance = winRate * winLossRatio;
+
+                    decimal grossProfit = winningTrades.Sum(t => t.PnL);
+                    decimal grossLoss = Math.Abs(losingTrades.Sum(t => t.PnL));
+                    decimal profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 99.99m : 0m);
+
+                    decimal bestTrade = todaysTrades.Max(t => t.PnL);
+                    decimal worstTrade = todaysTrades.Min(t => t.PnL);
+                    decimal ev = (winRate * avgWin) - (lossRate * avgLoss);
+
+                    // Collect active stats into individual entries so they can be paired evenly 2-by-2 across columns
+                    var activeStats = new List<(string Text, decimal? RawColor)>();
+
+                    if (StatShowTrades)
+                        activeStats.Add(($"Trades: {totalTrades}", null));
+
+                    if (StatShowWins)
+                        activeStats.Add(($"Wins: {wins}", null));                    
+
+                    if (StatShowPerformance)
+                        activeStats.Add(($"Edge: {performance:0.02}", performance >= 0.5m ? 1m : -1m));
+
+                    if (StatShowEV)
+                        activeStats.Add(($"EV: {FormatCurrency(ev)}", ev));
+
+                    if (StatShowProfitFactor)
+                        activeStats.Add(($"Profit Factor: {profitFactor:0.02}", profitFactor));
+
+                    if (StatShowWinRate)
+                        activeStats.Add(($"Win rate: {winRate * 100:0}%", null));
+
+                    if (StatShowAvgWin)
+                        activeStats.Add(($"Avg Win: {FormatCurrency(avgWin)}", null));
+
+                    if (StatShowAvgLoss)
+                        activeStats.Add(($"Avg Loss: {FormatCurrency(avgLoss)}", null));
+
+                    if (StatShowBestTrade)
+                        activeStats.Add(($"Best: {FormatCurrency(bestTrade)}", null));
+
+                    if (StatShowWorstTrade)
+                        activeStats.Add(($"Worst: {FormatCurrency(worstTrade)}", null));
+
+                    if (activeStats.Any())
+                    {
+                        lines.Add(new("----------------", "---------", null));
+
+                        // Distribute evenly across 2 columns with independent coloring for both sides
+                        for (int i = 0; i < activeStats.Count; i += 2)
+                        {
+                            string col1 = activeStats[i].Text;
+                            decimal? raw1 = activeStats[i].RawColor;
+
+                            string col2 = "";
+                            decimal? raw2 = null;
+
+                            if (i + 1 < activeStats.Count)
+                            {
+                                col2 = activeStats[i + 1].Text;
+                                raw2 = activeStats[i + 1].RawColor;
+                            }
+
+                            lines.Add(new DisplayLine(col1, col2, raw1, true, raw2));
+                        }
+                    }
+                }
+            }
+
+            return lines;
+        }
+
+        private void PlayAlert(string soundFile, string message)
+        {
+            if (string.IsNullOrWhiteSpace(soundFile)) return;
+
+            try
+            {
+                AddAlert(soundFile, InstrumentInfo.Instrument, message, _backgroundColor, _textColor);
+            }
+            catch
+            {
+                // Suppress exceptions
+            }
+        }
+
+        private Color ColorFor(decimal? raw)
+            => raw is null ? _textColor
+             : raw > 0m ? _positiveColor
+             : raw < 0m ? _negativeColor
+                        : _neutralColor;
+
+        private void DrawColoredText(RenderContext context, List<DisplayLine> lines,
+    Rectangle textRect, int maxLabelWidth)
+        {
+            var lineHeight = (int)context.MeasureString("A", _font).Height;
+            var valueColumnX = textRect.X + maxLabelWidth + ColumnSpacing;
+            var currentY = textRect.Y;
+
+            foreach (var line in lines)
+            {
+                if (line.IsStatPair)
+                {
+                    // Stat rows: Color both the left and right items independently based on their own rules
+                    context.DrawString(line.Label, _font, ColorFor(line.RawForColoring), textRect.X, currentY);
+                    context.DrawString(line.Value, _font, ColorFor(line.RawForColoringRight), valueColumnX, currentY);
+                }
+                else
+                {
+                    // Standard HUD rows (Account, Balance, PnL): Static label on left, colored value on right
+                    context.DrawString(line.Label, _font, _textColor, textRect.X, currentY);
+                    context.DrawString(line.Value, _font, ColorFor(line.RawForColoring), valueColumnX, currentY);
+                }
+                currentY += lineHeight;
+            }
+        }
+
+        private string FormatCurrency(decimal value) => value.ToString("N2");
+
+        private int CalculateXPosition(int width) => HorizontalPosition switch
+        {
+            HorizontalAlignment.Left => OffsetX,
+            HorizontalAlignment.Center => (Container.Region.Width - width) / 2,
+            HorizontalAlignment.Right => Container.Region.Width - width - OffsetX,
+            _ => OffsetX
+        };
+
+        private int CalculateYPosition(int height) => VerticalPosition switch
+        {
+            VerticalAlignment.Top => OffsetY,
+            VerticalAlignment.Middle => (Container.Region.Height - height) / 2,
+            VerticalAlignment.Bottom => Container.Region.Height - height - OffsetY,
+            _ => OffsetY
+        };
+
+        #endregion
+    }
+}

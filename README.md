@@ -51,3 +51,79 @@ Compatible data feed supporting trading metrics and historical trade statistics 
 
 📄 License
 This project is open-source and free for personal and community use. Feel free to modify and adapt it to your trading workflow!
+
+Take a look:
+
+<img width="489" height="466" alt="Screenshot 2026-09-25 131318" src="https://github.com/user-attachments/assets/fab27ed9-d01b-46bd-8ad3-702921c15d62" />
+<img width="608" height="864" alt="Screenshot 2026-09-25 131639" src="https://github.com/user-attachments/assets/b5e000ef-8a23-4dfe-9a4f-307ae0f7bd40" />
+<img width="609" height="860" alt="Screenshot 2026-09-25 131656" src="https://github.com/user-attachments/assets/1e01bdf2-52b4-49ec-ad59-a83f6f8905ed" />
+<img width="612" height="859" alt="Screenshot 2026-09-25 131712" src="https://github.com/user-attachments/assets/744b5dac-2182-4dcf-899c-cf55ad74e5da" />
+
+Instructions:
+
+Option A: Installing via Compiled .dll File (Easiest)
+If you shared a pre-compiled .dll file, users can install it instantly without editing code:
+
+Download the .dll file.
+
+Open your ATAS custom indicators folder by pasting this path into your Windows File Explorer address bar:
+%APPDATA%\ATAS\Indicators
+
+Drop the .dll file directly into that folder.
+
+Open or restart ATAS, open any chart, and press Ctrl + I.
+
+Look under the Custom category to find and add Account Info(Custom).
+
+
+Option B: Visual Studio
+1. Create a New Class Library Project
+Open Visual Studio and click Create a new project.
+
+Search for and select Class Library (make sure it's the C# version targeting .NET Framework or the appropriate .NET runtime version your ATAS version uses, typically .NET 10 depending on the ATAS build). Click Next.
+
+Name your project (e.g., AccountInfoCustom), choose your saving location, and click Create.
+
+2. Add ATAS Reference Assemblies
+To compile ATAS indicators, your project needs references to the core ATAS libraries (ATAS.Indicators.dll and OFT.Rendering.dll).
+
+In the Solution Explorer on the right, right-click on Dependencies (or References) and select Add Reference... (or Manage NuGet Packages if applicable).
+
+Click Browse and navigate to your ATAS installation directory (usually C:\Program Files\ATAS\ or your user path).
+
+Select the following required DLL files:
+
+ATAS.Indicators.dll
+
+OFT.Rendering.dll
+
+Any other dependencies referenced by your project (like data feed cores).
+
+Click OK to add them.
+(Tip: In the reference properties, set Copy Local to False since ATAS loads these natively at runtime).
+
+3. Add the Code File
+Visual Studio automatically creates a default file named Class1.cs. Right-click it, select Rename, and change it to MyCustomIndicator.cs.
+
+Open the file, delete any placeholder code, and paste your indicator C# source code into it.
+
+Save the file (Ctrl + S).
+
+4. Build the Project
+Go to the top menu and select Build > Clean Solution (to clear out old build caches).
+
+Select Build > Build Solution (Ctrl + Shift + B).
+
+Check the Output window at the bottom to ensure it says 1 succeeded, 0 failed.
+
+5. Deploy to ATAS
+Once built successfully, go to your project folder in Windows Explorer and find the compiled file located in bin\Debug\ or bin\Release\.
+
+Copy the generated .dll file.
+
+Drop it directly into your local ATAS indicators folder:
+%APPDATA%\ATAS\Indicators
+
+Open ATAS, open a chart, press Ctrl + I, and add your custom indicator from the list!
+
+(If you have any trouble during this process, chatgpt, claude or gemini is your friend)
